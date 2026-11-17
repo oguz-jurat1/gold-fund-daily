@@ -347,7 +347,8 @@ def build_feishu_text(mode, data, now, quote_dt, warning):
     title = "盘前" if mode == "am" else "收盘"
     metals, domestic, cross = data["metals"], data["domestic"], data["cross"]
 
-    lines = [f"📊 {now:%m-%d} {title}"]
+    # 标题必须含"金银"：飞书机器人安全设置里以它为关键词，缺了会被拒收（code 19024）
+    lines = [f"📊 金银 · {now:%m-%d} {title}"]
     if warning:
         lines.append(warning)
     if now.weekday() >= 5:
