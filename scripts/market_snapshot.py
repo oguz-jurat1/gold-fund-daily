@@ -330,64 +330,45 @@ def build_report(mode, data, now, quote_dt, warning):
     return "\n".join(lines)
 
 
+# 飞书消息里的简称
+FEISHU_SHORT = {
+    "伦敦金 XAU": "伦敦金",
+    "伦敦银 XAG": "伦敦银",
+    "黄金延期 Au(T+D)": "上海金",
+    "白银延期 Ag(T+D)": "上海银",
+    "纳斯达克100": "纳指100",
+}
+# A股只报涨跌幅，不出点位；不含上证指数（与沪深300高度重合，且无对应基金标的）
+FEISHU_INDEX = ["沪深300", "中证500", "创业板指", "科创50"]
+
+
 def build_feishu_text(mode, data, now, quote_dt, warning):
-    """飞书文本消息：涨跌幅为主，等宽对齐（按显示宽度算，中文占 2 列）。"""
-    is_am = mode == "am"
-    title = "盘前速览" if is_am else "收盘复盘"
+    """飞书消息：极简版，一行一个标的，只报涨跌幅。"""
+    title = "盘前" if mode == "am" else "收盘"
     metals, domestic, cross = data["metals"], data["domestic"], data["cross"]
 
-    head = f"📊 {now:%m-%d} 金银 & 基金 · {title}"
-    if quote_dt:
-        head += f"　行情 {quote_dt:%H:%M}"
-    lines = [head]
+    lines = [f"📊 {now:%m-%d} {title}"]
     if warning:
         lines.append(warning)
     if now.weekday() >= 5:
-        lines.append("⚠️ 周末休市，为最近交易日数据")
+        lines.append("周末休市，为最近交易日数据")
 
     lines.append("")
-    lines.append("━━ 贵金属 ━━")
     for name, unit, price, change, digits in metals:
+        label = FEISHU_SHORT.get(name, name)
         lines.append(
-            f"{arrow(change)} {pad(name, 16)}"
-            f"{pad(fmt_price(price, digits), 11, 'right')}"
-            f"{pad(fmt_pct(change), 9, 'right')}"
+            f"{arrow(change)} {pad(label, 7)}"
+            f"{pad(fmt_price(price, digits), 10, 'right')}  {fmt_pct(change)}"
         )
 
     lines.append("")
-    lines.append("━━ A股宽基 ━━")
-    lines.append(f"   {pad('指数', 14)}{pad('涨跌', 11, 'right')}{pad('ETF', 9, 'right')}")
     for name, ip, ic, etf_code, ep, ec, note in domestic:
-        etf_cell = "—" if ep is None else ("未成交" if note == "未成交" else fmt_pct(ec))
-        lines.append(
-            f"{arrow(ic)} {pad(name, 14)}"
-            f"{pad(fmt_pct(ic), 11, 'right')}"
-            f"{pad(etf_cell, 9, 'right')}"
-        )
+        if name not in FEISHU_INDEX:
+            continue
+        lines.append(f"{arrow(ic)} {pad(name, 10)}{fmt_pct(ic)}")
 
-    lines.append("")
-    lines.append("━━ 跨境 ━━")
     for name, ip, ic, etf_code, ep, ec, note in cross:
-        etf_cell = "—" if ep is None else ("未成交" if note == "未成交" else fmt_pct(ec))
-        lines.append(
-            f"{arrow(ic)} {pad(name, 14)}"
-            f"{pad(fmt_pct(ic), 11, 'right')}"
-            f"{pad(etf_cell, 9, 'right')}"
-        )
-
-    a_chg = [r[2] for r in domestic if r[2] is not None]
-    lines.append("")
-    if a_chg:
-        avg = sum(a_chg) / len(a_chg)
-        lines.append(f"宽基均值 {fmt_pct(avg)}　|　左：指数　右：对应ETF")
-
-    # ETF 未成交的跨境品种，补一句指数口径，避免误读为无数据
-    pending = [n for n, _, ic, _, _, _, note in cross if note == "未成交" and ic is not None]
-    if pending:
-        idx = "、".join(
-            f"{n} {fmt_pct(ic)}" for n, _, ic, _, _, _, note in cross if note == "未成交" and ic is not None
-        )
-        lines.append(f"（{idx} 为指数口径，ETF 待 A股时段成交后更新）")
+        lines.append(f"{arrow(ic)} {pad(FEISHU_SHORT.get(name, name), 10)}{fmt_pct(ic)}")
 
     return "\n".join(lines).strip()
 
