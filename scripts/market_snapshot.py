@@ -330,6 +330,69 @@ def build_report(mode, data, now, quote_dt, warning):
     return "\n".join(lines)
 
 
+def build_comment(data, mode="pm"):
+    """两句盘面判断：客观描述 + 对定投的影响。只依据当天数据，不做预测。
+
+    盘前（am）时 A股 尚未开盘，其涨跌幅是上一交易日数据，不纳入描述。
+    """
+    metals, domestic, cross = data["metals"], data["domestic"], data["cross"]
+
+    gold = next((r[3] for r in metals if "XAU" in r[0]), None)
+    silver = next((r[3] for r in metals if "XAG" in r[0]), None)
+    a_list = [r[2] for r in domestic if r[2] is not None]
+    a_avg = sum(a_list) / len(a_list) if a_list else None
+    ndx_row = next((r for r in cross if "纳斯达克" in r[0]), None)
+    ndx = ndx_row[2] if ndx_row else None
+
+    # ---- 第一句：盘面方向 ----
+    parts = []
+    if gold is not None and silver is not None:
+        if gold > 0 and silver > 0:
+            parts.append("金银同涨")
+        elif gold < 0 and silver < 0:
+            parts.append("金银同跌")
+        else:
+            parts.append("金银分化")
+    if a_avg is not None and mode == "pm":
+        if a_avg > 0.5:
+            parts.append(f"A股普涨（均值{fmt_pct(a_avg)}）")
+        elif a_avg < -0.5:
+            parts.append(f"A股普跌（均值{fmt_pct(a_avg)}）")
+        else:
+            parts.append(f"A股分化（均值{fmt_pct(a_avg)}）")
+    if ndx is not None:
+        if ndx < -1:
+            parts.append(f"纳指重挫 {fmt_pct(ndx)}")
+        elif ndx > 1:
+            parts.append(f"纳指大涨 {fmt_pct(ndx)}")
+        else:
+            parts.append(f"纳指 {fmt_pct(ndx)}")
+    line1 = "，".join(parts) + "。"
+
+    # ---- 第二句：避险还是risk-on ----
+    mood = ""
+    if gold is not None and a_avg is not None and mode == "pm":
+        if gold > 0 and a_avg < 0:
+            mood = "金涨股跌，避险情绪偏重"
+        elif gold < 0 and a_avg > 0:
+            mood = "金跌股涨，风险偏好回升"
+        elif gold > 0 and a_avg > 0:
+            mood = "金银与股票同涨，资金面偏宽松"
+        elif gold < 0 and a_avg < 0:
+            mood = "金银与股票同跌，普遍在去杠杆"
+
+    line2 = ""
+    if ndx is not None:
+        if ndx < -1:
+            line2 = "美股跌幅较大，纳指/标普日投照常扣款，同样的钱买到更多份额。"
+        elif ndx > 1.5:
+            line2 = "美股大涨，日投买到的份额变贵，这是定投的常态代价，不必回避。"
+    if mood:
+        line2 = (mood + "。" + line2) if line2 else (mood + "。")
+
+    return line1, line2
+
+
 # 飞书消息里的简称
 FEISHU_SHORT = {
     "伦敦金 XAU": "伦敦金",
@@ -370,6 +433,12 @@ def build_feishu_text(mode, data, now, quote_dt, warning):
 
     for name, ip, ic, etf_code, ep, ec, note in cross:
         lines.append(f"{arrow(ic)} {pad(FEISHU_SHORT.get(name, name), 10)}{fmt_pct(ic)}")
+
+    line1, line2 = build_comment(data, mode)
+    lines.append("")
+    lines.append(line1)
+    if line2:
+        lines.append(line2)
 
     return "\n".join(lines).strip()
 
