@@ -1,0 +1,61 @@
+name: 收盘复盘 21:00
+
+on:
+  schedule:
+    # 21:00 北京时间 = 13:00 UTC
+    - cron: "0 13 * * *"
+  workflow_dispatch: {} # 支持手动触发，用于验证
+
+permissions:
+  contents: write
+
+concurrency:
+  group: market-pm
+  cancel-in-progress: false
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: pip install --quiet certifi
+
+      - name: 抓取行情并推送飞书
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          TZ: Asia/Shanghai
+        run: python scripts/market_snapshot.py --mode pm --push
+
+      - name: 归档报告回仓库
+        run: |
+          git config user.name "market-bot"
+          git config user.email "market-bot@users.noreply.github.com"
+          git add reports/
+          if git diff --cached --quiet; then
+            echo "报告无变更，跳过提交"
+          else
+            git commit -m "data: $(TZ=Asia/Shanghai date +%Y-%m-%d) 收盘复盘"
+            git push
+          fi
+
+      - name: 失败时输出诊断
+        if: failure()
+        run: |
+          echo "### 抓取失败诊断" >> $GITHUB_STEP_SUMMARY
+          echo "- runner 时区/地区：$(date -u) UTC" >> $GITHUB_STEP_SUMMARY
+          echo "- 尝试直连新浪行情接口：" >> $GITHUB_STEP_SUMMARY
+          curl -s -m 15 -o /dev/null -w "HTTP %{http_code}，耗时 %{time_total}s\n" \
+            -H "Referer: https://finance.sina.com.cn" \
+            "https://hq.sinajs.cn/list=hf_XAU" >> $GITHUB_STEP_SUMMARY || true
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "若 HTTP 非 200 或返回空，说明境外 runner 访问新浪行情受限，需换数据源。" >> $GITHUB_STEP_SUMMARY
