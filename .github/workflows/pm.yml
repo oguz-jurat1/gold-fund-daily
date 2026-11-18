@@ -1,9 +1,9 @@
-name: 收盘复盘 21:00
+name: 收盘复盘 20:40触发
 
 on:
   schedule:
-    # 21:00 北京时间 = 13:00 UTC
-    - cron: "0 13 * * *"
+    # 目标 21:00 发出；提前到 20:40 触发，补偿 cron 延迟
+    - cron: "40 12 * * *"
   workflow_dispatch: {} # 支持手动触发，用于验证
 
 permissions:
@@ -33,6 +33,7 @@ jobs:
       - name: 抓取行情并推送飞书
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
           TZ: Asia/Shanghai
         run: python scripts/market_snapshot.py --mode pm --push
 
