@@ -202,6 +202,94 @@ LUNAR_API = "https://60s.viki.moe/v2/lunar?date={date}"
 CN_WEEK = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 
 
+# ---------------- 新闻分析（可选，需 DEEPSEEK_KEY）----------------
+LLM_API = "https://api.deepseek.com/chat/completions"
+LLM_MODEL = "deepseek-chat"
+
+# 一旦出现这些词，判定为越界输出，整段丢弃
+LLM_BANNED = ["建议买入", "建议卖出", "应当买入", "应当卖出", "加仓", "减仓", "清仓",
+              "必涨", "必跌", "一定涨", "一定跌", "抄底", "梭哈", "稳赚", "保证收益",
+              "目标价", "支撑位", "阻力位", "推荐买", "强烈建议"]
+
+LLM_SYSTEM = """你是一名财经观察员。任务是从当日新闻里读出与"钱"相关的信号——因为政策、民生、产业、国际局势最终都会传导到居民收入、企业成本、资产价格和资金流向上。
+
+分析视角（挑有信息量的讲，不必面面俱到）：
+· 政策方向：财政、货币、监管、产业政策在鼓励什么、限制什么
+· 民生与消费：就业、收入、物价、社保、老龄化、教育医疗如何影响居民的支付能力
+· 产业与投资：哪些环节的供给或需求会变（只讲传导逻辑，不推荐任何标的）
+· 资金的去处：居民、企业、政府的钱可能往哪流
+
+硬性约束（违反即视为失败）：
+1. 只能使用我给的新闻和行情，禁止编造数据、事件、时间、机构表态。
+2. 允许讲一般经济逻辑（例如"回收体系完善通常压低制造业原料成本"），但不得断言具体影响幅度（不许写"将上涨X%"）。
+3. 禁止预测涨跌、禁止目标价/支撑位/阻力位、禁止买入卖出建议。
+4. 禁止"必然""一定""肯定""毫无疑问"等确定性表述，用"通常""可能""倾向于"。
+5. 中文，输出 2 段，合计不超过 220 字。不加标题、不加序号、不用 Markdown 符号。"""
+
+
+def analyze_news(news_lines, data, now, label="今日新闻"):
+    """调用大模型，从新闻里读出与钱相关的信号。失败或越界返回 None，绝不阻塞主流程。"""
+    key = os.environ.get("DEEPSEEK_KEY", "").strip()
+    if not key or not news_lines:
+        return None
+
+    metals = data.get("metals") or []
+    gold = next((r for r in metals if "Au(T+D)" in r[0]), None)
+    silver = next((r for r in metals if "Ag(T+D)" in r[0]), None)
+    a_list = [r[2] for r in (data.get("domestic") or []) if r[2] is not None]
+    a_avg = sum(a_list) / len(a_list) if a_list else None
+    ndx = next((r[2] for r in (data.get("cross") or []) if "纳斯达克" in r[0]), None)
+
+    facts = []
+    if gold and gold[3] is not None:
+        facts.append(f"上海金 {gold[2]:.2f} 元/克 {gold[3]:+.2f}%")
+    if silver and silver[3] is not None:
+        facts.append(f"上海银 {silver[2]:.0f} 元/千克 {silver[3]:+.2f}%")
+    if a_avg is not None:
+        facts.append(f"A股主要宽基均值 {a_avg:+.2f}%")
+    if ndx is not None:
+        facts.append(f"纳斯达克100 {ndx:+.2f}%")
+
+    news_block = "\n".join(f"- {t}" for t in news_lines)
+    user = (
+        f"【行情】{'；'.join(facts) if facts else '无'}\n\n"
+        f"【{label}】\n{news_block}\n\n"
+        "请按约束输出两段观察：第一段讲这些新闻里反映出的钱与政策/民生的关系，"
+        "第二段讲对普通人和家庭财务可能意味着什么。不要强行把新闻和当日涨跌绑定。"
+    )
+
+    try:
+        ok, resp = _post_json(
+            LLM_API,
+            {
+                "model": LLM_MODEL,
+                "messages": [
+                    {"role": "system", "content": LLM_SYSTEM},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.4,
+                "max_tokens": 600,
+            },
+            timeout=50,
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        if not ok:
+            print(f"⚠️ 分析接口失败: {resp}", file=sys.stderr)
+            return None
+        text = (resp["choices"][0]["message"]["content"] or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️ 分析调用异常: {exc}", file=sys.stderr)
+        return None
+
+    hit = [w for w in LLM_BANNED if w in text]
+    if hit:
+        print(f"⚠️ 分析输出越界（{hit}），已丢弃", file=sys.stderr)
+        return None
+    if len(text) > 400:
+        text = text[:400].rstrip() + "…"
+    return text
+
+
 # ---------------- 突发异动监控 ----------------
 SURGE_STATE_FILE = os.path.join(BASE_DIR, "data", "surge-state.json")
 
@@ -831,6 +919,12 @@ def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
         for idx, item in enumerate(brief["news"], 1):
             lines.append(f"{idx}. {item}")
 
+        insight = analyze_news(brief["news"], data, now, "每日简讯")
+        if insight:
+            lines.append("")
+            lines.append("🔍 今日观察")
+            lines.append(insight)
+
     if extra and mode == "pm":
         news, new_keys = fetch_news()
         _PENDING_NEWS_KEYS.clear()
@@ -840,6 +934,13 @@ def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
             lines.append("📰 财经要闻")
             for cat, tstr, title in news:
                 lines.append(f"【{cat}】{tstr} {title}")
+
+            insight = analyze_news(
+                [f"[{cat}] {title}" for cat, _t, title in news], data, now, "财经要闻")
+            if insight:
+                lines.append("")
+                lines.append("🔍 今日观察")
+                lines.append(insight)
 
     # ---- 知识 + 单词：早晚都出 ----
     if extra:
@@ -875,12 +976,12 @@ def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
 
 # ---------------------------------------------------------------- 推送
 
-def _post_json(url, payload, timeout=20):
+def _post_json(url, payload, timeout=20, headers=None):
     """POST JSON，返回 (成功, 响应或错误信息)"""
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         url, data=body,
-        headers={"Content-Type": "application/json; charset=utf-8"},
+        headers={"Content-Type": "application/json; charset=utf-8", **(headers or {})},
         method="POST",
     )
     try:
