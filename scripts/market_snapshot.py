@@ -52,8 +52,40 @@ HEADERS = {
     ),
 }
 
-# 金价预警线（上海金 Au(T+D)，元/克）。跌破则每次检查都醒目提示。
-GOLD_ALERT_LOW = 700.0
+# 金价分段预警（上海金 Au(T+D)，元/克）
+# 跌破哪一档就在进入更深一档时提醒一次，只报新低，避免反复打扰
+GOLD_ALERT_TIERS = [800.0, 750.0, 700.0]
+GOLD_ALERT_STATE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "data", "gold-alert-state.json")
+
+TIER_LABEL = {
+    1: "进入 700 多区间",
+    2: "跌破 750",
+    3: "跌破 700，到你的目标价",
+}
+
+
+def price_to_tier(price):
+    """0=还没到；1=跌破800；2=跌破750；3=跌破700"""
+    tier = 0
+    for threshold in GOLD_ALERT_TIERS:
+        if price <= threshold:
+            tier += 1
+    return tier
+
+
+def read_alert_state():
+    try:
+        with open(GOLD_ALERT_STATE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:  # noqa: BLE001
+        return {"max_tier": 0, "history": []}
+
+
+def write_alert_state(state):
+    os.makedirs(os.path.dirname(GOLD_ALERT_STATE), exist_ok=True)
+    with open(GOLD_ALERT_STATE, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, ensure_ascii=False, indent=2)
 
 # 交易日历：A股节假日不硬编码，靠数据日期比对识别休市
 
@@ -437,14 +469,16 @@ def build_feishu_text(mode, data, now, quote_dt, warning):
     for name, ip, ic, etf_code, ep, ec, note in cross:
         lines.append(f"{arrow(ic)} {pad(FEISHU_SHORT.get(name, name), 10)}{fmt_pct(ic)}")
 
-    # 金价预警：未触发时显示距离，触发后顶部红色告警
-    gold_price = next((r[2] for r in metals if "AUTD" in r[1] or "Au(T+D)" in r[0]), None)
+    # 金价预警：显示下一档距离；已进入的档位在顶部提示
+    gold_price = next((r[2] for r in metals if "Au(T+D)" in r[0]), None)
     if gold_price and gold_price > 0:
-        gap_pct = (gold_price - GOLD_ALERT_LOW) / gold_price * 100
-        if gold_price <= GOLD_ALERT_LOW:
-            lines.insert(0, f"🚨 上海金 {fmt_price(gold_price)} 已跌破预警线 {GOLD_ALERT_LOW:.0f}")
-        else:
-            lines.append(f"距 {GOLD_ALERT_LOW:.0f} 元/克还有 -{gap_pct:.1f}%")
+        tier = price_to_tier(gold_price)
+        if tier > 0:
+            lines.insert(0, f"🚨 上海金 {fmt_price(gold_price)} · {TIER_LABEL[tier]}")
+        if tier < len(GOLD_ALERT_TIERS):
+            nxt = GOLD_ALERT_TIERS[tier]
+            gap = (gold_price - nxt) / gold_price * 100
+            lines.append(f"距 {nxt:.0f} 元/克还有 -{gap:.1f}%")
 
     line1, line2 = build_comment(data, mode)
     lines.append("")
@@ -457,26 +491,31 @@ def build_feishu_text(mode, data, now, quote_dt, warning):
 
 # ---------------------------------------------------------------- 推送
 
-def push_feishu(webhook, text, dry_run=False):
-    payload = {"msg_type": "text", "content": {"text": text}}
+def _post_json(url, payload, timeout=20):
+    """POST JSON，返回 (成功, 响应或错误信息)"""
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as resp:
+            return True, json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
 
+
+def push_feishu(webhook, text, dry_run=False):
+    """飞书群机器人（自定义机器人）"""
     if dry_run:
         print("\n--- 飞书消息预览（dry-run，未发送）---", file=sys.stderr)
         print(text, file=sys.stderr)
         return True
 
-    req = urllib.request.Request(
-        webhook,
-        data=body,
-        headers={"Content-Type": "application/json; charset=utf-8"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=20, context=SSL_CONTEXT) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        print(f"❌ 飞书推送失败: {exc}", file=sys.stderr)
+    ok, result = _post_json(webhook, {"msg_type": "text", "content": {"text": text}})
+    if not ok:
+        print(f"❌ 飞书推送失败: {result}", file=sys.stderr)
         return False
 
     code = result.get("code", result.get("StatusCode", -1))
@@ -485,6 +524,47 @@ def push_feishu(webhook, text, dry_run=False):
         return False
     print("✅ 飞书推送成功", file=sys.stderr)
     return True
+
+
+def push_wecom(webhook, text, dry_run=False):
+    """企业微信群机器人。注意：个人微信群无官方 API，用不了这个。"""
+    if dry_run:
+        print("\n--- 企业微信消息预览（dry-run，未发送）---", file=sys.stderr)
+        print(text, file=sys.stderr)
+        return True
+
+    ok, result = _post_json(webhook, {"msgtype": "text", "text": {"content": text}})
+    if not ok:
+        print(f"❌ 企业微信推送失败: {result}", file=sys.stderr)
+        return False
+
+    code = result.get("errcode", -1)
+    if code != 0:
+        print(f"❌ 企业微信返回错误: {result}", file=sys.stderr)
+        return False
+    print("✅ 企业微信推送成功", file=sys.stderr)
+    return True
+
+
+def push_all(text, dry_run=False):
+    """按配置推送到所有已启用的通道。任一失败不影响其他。"""
+    channels = [
+        ("飞书", "FEISHU_WEBHOOK", push_feishu),
+        ("企业微信", "WECOM_WEBHOOK", push_wecom),
+    ]
+    enabled = [(name, os.environ.get(env, "").strip(), fn)
+               for name, env, fn in channels]
+    enabled = [(n, u, f) for n, u, f in enabled if u]
+
+    if not enabled:
+        if dry_run:
+            push_feishu("", text, dry_run=True)
+            return True
+        print("❌ 未配置任何推送通道（FEISHU_WEBHOOK / WECOM_WEBHOOK）", file=sys.stderr)
+        return False
+
+    results = [fn(url, text, dry_run=dry_run) for _, url, fn in enabled]
+    return all(results)
 
 
 # ---------------------------------------------------------------- 主流程
@@ -521,16 +601,35 @@ def main():
         "cross": parse_cross_border(raw),
     }
 
-    # 预警模式：未跌破直接静默退出，不发消息不归档
+    # 预警模式：只在进入更深一档时推送，否则静默
     if args.alert_only:
         gold_price = next((r[2] for r in data["metals"] if "Au(T+D)" in r[0]), None)
         if gold_price is None:
             print("❌ 未取到金价，跳过本次检查", file=sys.stderr)
             return 0
-        if gold_price > GOLD_ALERT_LOW:
-            print(f"金价 {gold_price:.2f}，未跌破 {GOLD_ALERT_LOW:.0f}，本轮不推送", file=sys.stderr)
+
+        tier = price_to_tier(gold_price)
+        state = read_alert_state()
+        prev_max = int(state.get("max_tier", 0))
+
+        print(f"金价 {gold_price:.2f} 元/克 → 当前档位 {tier}（历史最深 {prev_max}）", file=sys.stderr)
+        if tier <= prev_max:
+            print("未创新低，本轮不推送", file=sys.stderr)
             return 0
-        print(f"🚨 金价 {gold_price:.2f} 已跌破 {GOLD_ALERT_LOW:.0f}，触发推送", file=sys.stderr)
+
+        print(f"🚨 进入新档位 {tier}（{TIER_LABEL[tier]}），触发推送", file=sys.stderr)
+
+        text = build_feishu_text(args.mode, data, now, quote_dt, warning)
+        if not push_all(text, dry_run=args.dry_run):
+            return 1
+
+        state["max_tier"] = tier
+        state.setdefault("history", []).append(
+            {"date": now.strftime("%Y-%m-%d %H:%M"), "price": gold_price, "tier": tier}
+        )
+        write_alert_state(state)
+        print(f"状态已更新：max_tier={tier}", file=sys.stderr)
+        return 0
 
     report = build_report(args.mode, data, now, quote_dt, warning)
     print(report)
@@ -543,12 +642,8 @@ def main():
         print(f"\n_已归档: {path}_", file=sys.stderr)
 
     if args.push:
-        webhook = os.environ.get("FEISHU_WEBHOOK", "").strip()
-        if not webhook and not args.dry_run:
-            print("❌ 未设置 FEISHU_WEBHOOK 环境变量", file=sys.stderr)
-            return 1
         text = build_feishu_text(args.mode, data, now, quote_dt, warning)
-        if not push_feishu(webhook, text, dry_run=args.dry_run):
+        if not push_all(text, dry_run=args.dry_run):
             return 1
 
     return 0
