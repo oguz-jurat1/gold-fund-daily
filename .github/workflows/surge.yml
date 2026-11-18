@@ -36,6 +36,7 @@ jobs:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          DEEPSEEK_KEY: ${{ secrets.DEEPSEEK_KEY }}
           TZ: Asia/Shanghai
         run: python scripts/market_snapshot.py --mode pm --surge-only --push --no-save
 
