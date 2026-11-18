@@ -1,0 +1,48 @@
+name: 金价预警 700
+
+# 每天检查 4 次，只在跌破 700 元/克时推送，否则静默
+on:
+  schedule:
+    - cron: "0 1 * * *"   # 09:00 北京
+    - cron: "0 5 * * *"   # 13:00 北京
+    - cron: "0 9 * * *"   # 17:00 北京
+    - cron: "0 14 * * *"  # 22:00 北京
+  workflow_dispatch: {} # 手动触发用于验证
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gold-alert
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: pip install --quiet certifi
+
+      - name: 检查金价（跌破才推送）
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          TZ: Asia/Shanghai
+        run: python scripts/market_snapshot.py --mode pm --alert-only --push --no-save
+
+      - name: 失败时输出诊断
+        if: failure()
+        run: |
+          echo "### 金价检查失败" >> $GITHUB_STEP_SUMMARY
+          curl -s -m 15 -o /dev/null -w "新浪行情接口 HTTP %{http_code}\n" \
+            -H "Referer: https://finance.sina.com.cn" \
+            "https://hq.sinajs.cn/list=gds_AUTD" >> $GITHUB_STEP_SUMMARY || true
