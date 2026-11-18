@@ -1,0 +1,52 @@
+name: 金价异动巡检
+
+# 交易时段每小时巡检：只在出现单日大跌 / 短时急跌时推送，平时静默
+on:
+  schedule:
+    # 北京时间 08:00-23:00 每小时（UTC 0-15 点）
+    - cron: "5 0-15 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gold-surge
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: pip install --quiet certifi
+
+      - name: 巡检金价异动
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          TZ: Asia/Shanghai
+        run: python scripts/market_snapshot.py --mode pm --surge-only --push --no-save
+
+      - name: 保存巡检状态（冷却记录）
+        run: |
+          git config user.name "market-bot"
+          git config user.email "market-bot@users.noreply.github.com"
+          git add data/ 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "状态无变化"
+          else
+            git commit -m "chore: 更新异动巡检状态 $(TZ=Asia/Shanghai date +%H:%M)"
+            git push
+          fi
