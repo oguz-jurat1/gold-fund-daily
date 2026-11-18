@@ -193,6 +193,31 @@ def fetch_news(per_cat=2, max_total=8, max_len=40):
     return out, keys
 
 
+DAILY_BRIEF_API = "https://60s.viki.moe/v2/60s"
+
+
+def fetch_daily_brief():
+    """抓每日简讯（含农历、星期、微语）。返回 dict 或 None。
+
+    内容原样引用，不改写。若来源日期不是今天，会在标题里标出真实日期。
+    """
+    try:
+        d = _http_json(DAILY_BRIEF_API, {"User-Agent": "Mozilla/5.0"})
+        data = d.get("data") or {}
+        news = data.get("news") or []
+        if not news:
+            return None
+        return {
+            "date": data.get("date", ""),
+            "week": data.get("day_of_week", ""),
+            "lunar": data.get("lunar_date", ""),
+            "news": news,
+            "tip": (data.get("tip") or "").strip(),
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def load_daily_knowledge(now):
     """按日期轮换取一条投资知识，内容来自固定审核库。"""
     try:
@@ -611,6 +636,9 @@ def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
     metals, domestic, cross = data["metals"], data["domestic"], data["cross"]
 
     # 标题必须含"金银"：飞书机器人安全设置里以它为关键词，缺了会被拒收（code 19024）
+    # 早报先取每日简讯（含农历），日期头放在最上方
+    brief = fetch_daily_brief() if (extra and mode == "am") else None
+
     lines = [f"📊 金银 · {now:%m-%d} {title}"]
     if warning:
         lines.append(warning)
@@ -645,8 +673,17 @@ def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
             gap = (gold_price - nxt) / gold_price * 100
             lines.append(f"距 {nxt:.0f} 元/克还有 -{gap:.1f}%")
 
-    # ---- 财经要闻 / 今日知识 / 今日单词 ----
-    if extra:
+    # ---- 每日简讯（早报）/ 财经要闻（晚报）----
+    if brief:
+        lines.append("")
+        lines.append(f"📰 每日简讯（{len(brief['news'])} 条）")
+        for idx, item in enumerate(brief["news"], 1):
+            lines.append(f"{idx}. {item}")
+        if brief.get("tip"):
+            lines.append("")
+            lines.append(f"【微语】{brief['tip']}")
+
+    if extra and mode == "pm":
         news, new_keys = fetch_news()
         _PENDING_NEWS_KEYS.clear()
         _PENDING_NEWS_KEYS.extend(new_keys)
@@ -656,6 +693,8 @@ def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
             for cat, tstr, title in news:
                 lines.append(f"【{cat}】{tstr} {title}")
 
+    # ---- 知识 + 单词：早晚都出 ----
+    if extra:
         k = load_daily_knowledge(now)
         if k:
             lines.append("")
@@ -668,6 +707,13 @@ def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
             lines.append("🔤 今日单词")
             for w, pos, cn in ws:
                 lines.append(f"{pad(w, 20)}{pad(pos, 10)}{cn}")
+
+    if brief:
+        head = f"📅 {brief['date']} {brief['week']}"
+        if brief.get("lunar"):
+            head += f" 农历{str(brief['lunar']).split('年')[-1]}"
+        lines.insert(0, head)
+        lines.insert(1, "")
 
     line1, line2 = build_comment(data, mode)
     lines.append("")
