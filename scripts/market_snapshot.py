@@ -52,6 +52,171 @@ HEADERS = {
     ),
 }
 
+# ---------------- 财经新闻 ----------------
+NEWS_API = ("https://zhibo.sina.com.cn/api/zhibo/feed"
+            "?page={page}&page_size=50&zhibo_id=152&tag_id=0&dire=f&dpc=1")
+
+# 只要跟钱和政策有关，宁缺毋滥
+NEWS_KEEP = ["央行", "人民银行", "证监会", "金融监管", "银保监", "财政部", "发改委",
+             "统计局", "国务院", "降准", "降息", "加息", "LPR", "CPI", "PPI", "GDP",
+             "关税", "税收", "监管", "新规", "条例", "货币政策", "财政政策",
+             "指数", "股指", "汇率", "人民币", "国债", "利率", "经济数据", "社融",
+             "进出口", "房价", "楼市", "信贷", "存款", "保险", "养老", "社保"]
+
+# 排除纯政治/非财经，避免信息噪音
+NEWS_DROP = ["习近平", "普京", "国台办", "台湾", "外交", "会晤", "元首", "总书记",
+             "政治局", "人大", "政协", "选举", "战争", "军事", "地震", "台风", "爆炸",
+             "车祸", "犯罪", "判决", "明星", "娱乐", "体育", "奥运"]
+
+KNOWLEDGE_FILE = os.path.join(BASE_DIR, "data", "daily-knowledge.json")
+WORDS_FILE = os.path.join(BASE_DIR, "data", "daily-words.json")
+
+
+def _http_json(url, headers=None, timeout=20):
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as r:
+        return json.loads(r.read().decode("utf-8", errors="replace"))
+
+
+# 新闻分类：首个命中即为该类
+NEWS_CATEGORIES = [
+    ("政策", ["证监会", "人民银行", "央行", "金融监管", "银保监", "财政部", "发改委",
+              "国务院", "监管", "新规", "条例", "政策", "征求意见", "工作会议",
+              "座谈会", "通知", "办法", "规定", "试点"]),
+    ("宏观", ["GDP", "CPI", "PPI", "社融", "信贷", "进出口", "外贸", "外汇储备",
+              "经济数据", "增速", "通胀", "通缩", "利率", "LPR", "降准", "降息",
+              "加息", "国债", "赤字", "就业", "制造业", "PMI", "工业增加值"]),
+    ("科技", ["人工智能", "AI", "算力", "芯片", "半导体", "机器人", "新能源",
+              "电动车", "光伏", "储能", "5G", "6G", "量子", "大模型", "数据中心",
+              "云计算", "自动驾驶", "低空", "卫星", "生物医药", "创新药"]),
+    ("市场", ["指数", "A股", "港股", "美股", "汇率", "债市", "期货", "现货",
+              "黄金", "原油", "涨停", "跌停", "成交量", "资金", "北向", "ETF",
+              "板块", "概念", "涨超", "跌超", "收涨", "收跌", "报价", "中签"]),
+    ("民生", ["养老", "社保", "医保", "房价", "楼市", "居民收入", "教育",
+              "生育", "物价", "租房", "公积金", "退休", "个人所得税",
+              "社会消费品", "就业率", "消费券", "以旧换新"]),
+    ("微观", ["公司", "集团", "股份", "上市", "并购", "增持", "回购", "业绩",
+              "签约", "中标", "产能", "出厂价"]),
+]
+
+NEWS_STATE_FILE = os.path.join(BASE_DIR, "data", "news-state.json")
+_PENDING_NEWS_KEYS = []   # 构建消息时暂存，推送成功后才落盘
+NEWS_KEEP_MAX = 300      # 去重记录最多保留多少条
+
+
+def load_news_state():
+    try:
+        with open(NEWS_STATE_FILE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:  # noqa: BLE001
+        return {"pushed": []}
+
+
+def save_news_state(state):
+    os.makedirs(os.path.dirname(NEWS_STATE_FILE), exist_ok=True)
+    pushed = state.get("pushed", [])[-NEWS_KEEP_MAX:]
+    with open(NEWS_STATE_FILE, "w", encoding="utf-8") as fh:
+        json.dump({"pushed": pushed}, fh, ensure_ascii=False, indent=1)
+
+
+def classify_news(title):
+    """返回新闻所属类别，命中不了返回 None。"""
+    for name, kws in NEWS_CATEGORIES:
+        if any(k in title for k in kws):
+            return name
+    return None
+
+
+def fetch_news(per_cat=2, max_total=8, max_len=40):
+    """抓新浪财经 7x24，按类别均衡挑选，并剔除已推送过的。
+
+    返回 (items, new_titles)
+      items = [(类别, 时间, 标题)]
+      new_titles = 本次要记入去重库的标题
+    标题原样引用，只截断不改写。
+    """
+    ua = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36")
+    items = []
+    for page in (1, 2, 3):
+        try:
+            d = _http_json(NEWS_API.format(page=page), {"User-Agent": ua})
+            items += d["result"]["data"]["feed"]["list"]
+        except Exception:  # noqa: BLE001
+            continue
+
+    seen_pushed = set(load_news_state().get("pushed", []))
+    by_cat = {}
+    seen_title = set()
+
+    for it in items:
+        raw = (it.get("rich_text") or "").strip()
+        if not raw:
+            continue
+        m = re.search(r"【(.+?)】", raw)
+        title = (m.group(1) if m else raw[:60]).strip()
+        title = re.sub(r"\s+", " ", title)
+
+        if len(title) < 8 or title in seen_title:
+            continue
+        if any(w in title for w in NEWS_DROP):
+            continue
+        if title in seen_pushed:          # 早晚推送去重
+            continue
+
+        cat = classify_news(title)
+        if not cat:
+            continue
+
+        bucket = by_cat.setdefault(cat, [])
+        if len(bucket) >= per_cat:
+            continue
+
+        seen_title.add(title)
+        ct = (it.get("create_time") or "")
+        tstr = ct[5:16] if len(ct) >= 16 else ct
+        shown = title[:max_len] + "…" if len(title) > max_len else title
+        bucket.append((cat, tstr, shown, title))
+
+    # 按类别顺序输出，每类最多 per_cat 条
+    order = [c for c, _ in NEWS_CATEGORIES]
+    out, keys = [], []
+    for cat in order:
+        for cat_name, tstr, shown, full in by_cat.get(cat, [])[:per_cat]:
+            if len(out) >= max_total:
+                break
+            out.append((cat_name, tstr, shown))
+            keys.append(full)
+        if len(out) >= max_total:
+            break
+
+    return out, keys
+
+
+def load_daily_knowledge(now):
+    """按日期轮换取一条投资知识，内容来自固定审核库。"""
+    try:
+        db = json.load(open(KNOWLEDGE_FILE, encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    if not db:
+        return None
+    idx = (now.timetuple().tm_yday - 1) % len(db)
+    return db[idx]
+
+
+def load_daily_words(now):
+    """按日期轮换取一组 5 个英文单词，内容来自固定词库。"""
+    try:
+        db = json.load(open(WORDS_FILE, encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return []
+    if not db:
+        return []
+    idx = (now.timetuple().tm_yday - 1) % len(db)
+    return db[idx]
+
+
 # 金价分段预警（上海金 Au(T+D)，元/克）
 # 跌破哪一档就在进入更深一档时提醒一次，只报新低，避免反复打扰
 GOLD_ALERT_TIERS = [800.0, 750.0, 700.0]
@@ -440,7 +605,7 @@ FEISHU_SHORT = {
 FEISHU_INDEX = ["沪深300", "中证500", "创业板指", "科创50"]
 
 
-def build_feishu_text(mode, data, now, quote_dt, warning):
+def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
     """飞书消息：极简版，一行一个标的，只报涨跌幅。"""
     title = "盘前" if mode == "am" else "收盘"
     metals, domestic, cross = data["metals"], data["domestic"], data["cross"]
@@ -479,6 +644,30 @@ def build_feishu_text(mode, data, now, quote_dt, warning):
             nxt = GOLD_ALERT_TIERS[tier]
             gap = (gold_price - nxt) / gold_price * 100
             lines.append(f"距 {nxt:.0f} 元/克还有 -{gap:.1f}%")
+
+    # ---- 财经要闻 / 今日知识 / 今日单词 ----
+    if extra:
+        news, new_keys = fetch_news()
+        _PENDING_NEWS_KEYS.clear()
+        _PENDING_NEWS_KEYS.extend(new_keys)
+        if news:
+            lines.append("")
+            lines.append("📰 财经要闻")
+            for cat, tstr, title in news:
+                lines.append(f"【{cat}】{tstr} {title}")
+
+        k = load_daily_knowledge(now)
+        if k:
+            lines.append("")
+            lines.append("💡 今日知识")
+            lines.append(f"{k['t']}：{k['d']}")
+
+        ws = load_daily_words(now)
+        if ws:
+            lines.append("")
+            lines.append("🔤 今日单词")
+            for w, pos, cn in ws:
+                lines.append(f"{pad(w, 20)}{pad(pos, 10)}{cn}")
 
     line1, line2 = build_comment(data, mode)
     lines.append("")
@@ -546,11 +735,41 @@ def push_wecom(webhook, text, dry_run=False):
     return True
 
 
+def push_pushplus(token, text, dry_run=False):
+    """PushPlus：消息推送到微信（关注公众号即可收，无需装 App）"""
+    if dry_run:
+        print("\n--- PushPlus 微信消息预览（dry-run，未发送）---", file=sys.stderr)
+        print(text, file=sys.stderr)
+        return True
+
+    # 标题取首行（PushPlus 标题过长会被截断）
+    title = text.strip().splitlines()[0].lstrip("📊 ").strip() or "行情推送"
+    payload = {
+        "token": token,
+        "title": title[:40],
+        # markdown 模板：用代码块包住正文，保住等宽对齐
+        "content": "```\n" + text + "\n```",
+        "template": "markdown",
+    }
+    ok, result = _post_json("https://www.pushplus.plus/send", payload)
+    if not ok:
+        print(f"❌ PushPlus 推送失败: {result}", file=sys.stderr)
+        return False
+
+    code = result.get("code")
+    if code != 200:
+        print(f"❌ PushPlus 返回错误: {result}", file=sys.stderr)
+        return False
+    print("✅ PushPlus(微信) 推送成功", file=sys.stderr)
+    return True
+
+
 def push_all(text, dry_run=False):
     """按配置推送到所有已启用的通道。任一失败不影响其他。"""
     channels = [
         ("飞书", "FEISHU_WEBHOOK", push_feishu),
         ("企业微信", "WECOM_WEBHOOK", push_wecom),
+        ("PushPlus微信", "PUSHPLUS_TOKEN", push_pushplus),
     ]
     enabled = [(name, os.environ.get(env, "").strip(), fn)
                for name, env, fn in channels]
@@ -619,7 +838,7 @@ def main():
 
         print(f"🚨 进入新档位 {tier}（{TIER_LABEL[tier]}），触发推送", file=sys.stderr)
 
-        text = build_feishu_text(args.mode, data, now, quote_dt, warning)
+        text = build_feishu_text(args.mode, data, now, quote_dt, warning, extra=False)
         if not push_all(text, dry_run=args.dry_run):
             return 1
 
@@ -645,6 +864,12 @@ def main():
         text = build_feishu_text(args.mode, data, now, quote_dt, warning)
         if not push_all(text, dry_run=args.dry_run):
             return 1
+        # 推送成功才写去重记录；失败则下次重发同批新闻
+        if _PENDING_NEWS_KEYS and not args.dry_run:
+            st = load_news_state()
+            st.setdefault("pushed", []).extend(_PENDING_NEWS_KEYS)
+            save_news_state(st)
+            print(f"✅ 已记录 {len(_PENDING_NEWS_KEYS)} 条新闻去重", file=sys.stderr)
 
     return 0
 
