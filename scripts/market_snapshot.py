@@ -202,6 +202,99 @@ LUNAR_API = "https://60s.viki.moe/v2/lunar?date={date}"
 CN_WEEK = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 
 
+# ---------------- 突发异动监控 ----------------
+SURGE_STATE_FILE = os.path.join(BASE_DIR, "data", "surge-state.json")
+
+SURGE_RULES = [
+    # (名称, 单日跌幅阈值%, 冷却小时)
+    ("单日大跌", 2.0, 12),
+    ("单日急跌", 1.0, 6),
+]
+SURGE_INTRADAY_DROP = 0.8     # 两次快照之间跌幅超过此值 → 急速下跌
+SURGE_INTRADAY_MAX_GAP = 150  # 分钟；超过这个间隔就不算“急跌”
+
+
+def load_surge_state():
+    try:
+        with open(SURGE_STATE_FILE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_surge_state(st):
+    try:
+        os.makedirs(os.path.dirname(SURGE_STATE_FILE), exist_ok=True)
+        with open(SURGE_STATE_FILE, "w", encoding="utf-8") as fh:
+            json.dump(st, fh, ensure_ascii=False, indent=1)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def check_surge(data, now):
+    """检测金价异动。返回 (是否触发, 告警标题, 补充说明列表)。"""
+    metals = data["metals"]
+    gold = next((r for r in metals if "Au(T+D)" in r[0]), None)
+    if not gold or not gold[2]:
+        return False, "", []
+
+    price, chg = gold[2], gold[3]
+    st = load_surge_state()
+    fired, title, notes = False, "", []
+
+    # 1) 单日跌幅分级
+    if chg is not None:
+        for name, thr, cool_h in SURGE_RULES:
+            if chg > -thr:
+                continue
+            key = f"day_{name}"
+            last = st.get(key, "")
+            if last:
+                try:
+                    last_dt = datetime.fromisoformat(last)
+                    if (now - last_dt).total_seconds() < cool_h * 3600:
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass
+            fired = True
+            title = f"⚠️ {name}：上海金 {price:.2f} 元/克（{chg:+.2f}%）"
+            st[key] = now.isoformat(timespec="minutes")
+            notes.append(f"较昨收下跌 {abs(chg):.2f}%，已达「{name}」阈值 {thr}%")
+            break
+
+    # 2) 短时急跌（和上次快照比）
+    last_price = st.get("last_price")
+    last_time = st.get("last_time")
+    if last_price and last_time:
+        try:
+            gap = (now - datetime.fromisoformat(last_time)).total_seconds() / 60
+            drop = (price - float(last_price)) / float(last_price) * 100
+            if 0 < gap <= SURGE_INTRADAY_MAX_GAP and drop <= -SURGE_INTRADAY_DROP:
+                k = "intraday"
+                last_fire = st.get(k, "")
+                ok = True
+                if last_fire:
+                    try:
+                        if (now - datetime.fromisoformat(last_fire)).total_seconds() < 3600:
+                            ok = False
+                    except Exception:  # noqa: BLE001
+                        pass
+                if ok:
+                    fired = True
+                    if not title:
+                        title = f"⚡ 短时急跌：上海金 {drop:+.2f}%（{gap:.0f} 分钟内）"
+                    notes.append(f"{gap:.0f} 分钟内从 {last_price} 跌到 {price:.2f}，跌幅 {drop:.2f}%")
+                    st[k] = now.isoformat(timespec="minutes")
+        except Exception:  # noqa: BLE001
+            pass
+
+    st["last_price"] = price
+    st["last_time"] = now.isoformat(timespec="minutes")
+    save_surge_state(st)
+
+    return fired, title, notes
+
+
 LUNAR_CACHE_FILE = os.path.join(BASE_DIR, "data", "lunar-cache.json")
 
 
@@ -908,6 +1001,8 @@ def main():
     parser.add_argument("--no-save", action="store_true", help="不归档到 reports/")
     parser.add_argument("--alert-only", action="store_true",
                         help="仅当金价跌破预警线时才推送，未触发则静默退出")
+    parser.add_argument("--surge-only", action="store_true",
+                        help="仅当金价出现单日大跌/短时急跌时才推送")
     args = parser.parse_args()
 
     codes = [
@@ -931,6 +1026,24 @@ def main():
         "domestic": parse_domestic_index(raw),
         "cross": parse_cross_border(raw),
     }
+
+    # 异动监控：只在出现急跌/大跌时推送
+    if args.surge_only:
+        fired, title, notes = check_surge(data, now)
+        if not fired:
+            print(f"金价无异常（{data['metals'][2][2] if len(data['metals'])>2 else '?'}），本轮静默",
+                  file=sys.stderr)
+            return 0
+        print(f"🚨 触发异动：{title}", file=sys.stderr)
+        # 首行必须含「金银」：飞书机器人以它为关键词，缺了会被拒收
+        body = ["📊 金银 · 突发提醒", "", title, ""]
+        body += [f"· {n}" for n in notes]
+        body.append("")
+        body.append(f"时间 {now:%m-%d %H:%M}")
+        text = "\n".join(body)
+        if not push_all(text, dry_run=args.dry_run):
+            return 1
+        return 0
 
     # 预警模式：只在进入更深一档时推送，否则静默
     if args.alert_only:
