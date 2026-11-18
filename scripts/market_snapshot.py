@@ -52,6 +52,9 @@ HEADERS = {
     ),
 }
 
+# 金价预警线（上海金 Au(T+D)，元/克）。跌破则每次检查都醒目提示。
+GOLD_ALERT_LOW = 700.0
+
 # 交易日历：A股节假日不硬编码，靠数据日期比对识别休市
 
 
@@ -434,6 +437,15 @@ def build_feishu_text(mode, data, now, quote_dt, warning):
     for name, ip, ic, etf_code, ep, ec, note in cross:
         lines.append(f"{arrow(ic)} {pad(FEISHU_SHORT.get(name, name), 10)}{fmt_pct(ic)}")
 
+    # 金价预警：未触发时显示距离，触发后顶部红色告警
+    gold_price = next((r[2] for r in metals if "AUTD" in r[1] or "Au(T+D)" in r[0]), None)
+    if gold_price and gold_price > 0:
+        gap_pct = (gold_price - GOLD_ALERT_LOW) / gold_price * 100
+        if gold_price <= GOLD_ALERT_LOW:
+            lines.insert(0, f"🚨 上海金 {fmt_price(gold_price)} 已跌破预警线 {GOLD_ALERT_LOW:.0f}")
+        else:
+            lines.append(f"距 {GOLD_ALERT_LOW:.0f} 元/克还有 -{gap_pct:.1f}%")
+
     line1, line2 = build_comment(data, mode)
     lines.append("")
     lines.append(line1)
@@ -483,6 +495,8 @@ def main():
     parser.add_argument("--push", action="store_true", help="推送到飞书群机器人")
     parser.add_argument("--dry-run", action="store_true", help="只构造消息不发送")
     parser.add_argument("--no-save", action="store_true", help="不归档到 reports/")
+    parser.add_argument("--alert-only", action="store_true",
+                        help="仅当金价跌破预警线时才推送，未触发则静默退出")
     args = parser.parse_args()
 
     codes = [
@@ -506,6 +520,17 @@ def main():
         "domestic": parse_domestic_index(raw),
         "cross": parse_cross_border(raw),
     }
+
+    # 预警模式：未跌破直接静默退出，不发消息不归档
+    if args.alert_only:
+        gold_price = next((r[2] for r in data["metals"] if "Au(T+D)" in r[0]), None)
+        if gold_price is None:
+            print("❌ 未取到金价，跳过本次检查", file=sys.stderr)
+            return 0
+        if gold_price > GOLD_ALERT_LOW:
+            print(f"金价 {gold_price:.2f}，未跌破 {GOLD_ALERT_LOW:.0f}，本轮不推送", file=sys.stderr)
+            return 0
+        print(f"🚨 金价 {gold_price:.2f} 已跌破 {GOLD_ALERT_LOW:.0f}，触发推送", file=sys.stderr)
 
     report = build_report(args.mode, data, now, quote_dt, warning)
     print(report)
