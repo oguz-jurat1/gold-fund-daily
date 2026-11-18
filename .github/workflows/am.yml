@@ -1,9 +1,9 @@
-name: 盘前速览 08:30
+name: 盘前速览 08:10触发
 
 on:
   schedule:
-    # 08:30 北京时间 = 00:30 UTC
-    - cron: "30 0 * * *"
+    # 目标 08:30 发出；GitHub cron 常延迟 5-20 分钟，故提前到 08:10 触发
+    - cron: "10 0 * * *"
   workflow_dispatch: {} # 支持手动触发，用于验证
 
 permissions:
@@ -33,6 +33,7 @@ jobs:
       - name: 抓取行情并推送飞书
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
           TZ: Asia/Shanghai
         run: python scripts/market_snapshot.py --mode am --push
 
