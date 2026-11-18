@@ -797,24 +797,34 @@ def _post_json(url, payload, timeout=20):
         return False, str(exc)
 
 
+def split_urls(raw):
+    """支持一个环境变量里放多个 webhook：逗号、分号、换行、空格均可分隔。"""
+    return [u.strip() for u in re.split(r"[,;\s]+", raw or "") if u.strip()]
+
+
 def push_feishu(webhook, text, dry_run=False):
-    """飞书群机器人（自定义机器人）"""
+    """飞书群机器人。webhook 可含多个地址，逐个推送。"""
+    urls = split_urls(webhook)
+
     if dry_run:
-        print("\n--- 飞书消息预览（dry-run，未发送）---", file=sys.stderr)
+        print(f"\n--- 飞书消息预览（dry-run，{len(urls)} 个群，未发送）---", file=sys.stderr)
         print(text, file=sys.stderr)
         return True
 
-    ok, result = _post_json(webhook, {"msg_type": "text", "content": {"text": text}})
-    if not ok:
-        print(f"❌ 飞书推送失败: {result}", file=sys.stderr)
-        return False
-
-    code = result.get("code", result.get("StatusCode", -1))
-    if code not in (0, None) and str(code) != "0":
-        print(f"❌ 飞书返回错误: {result}", file=sys.stderr)
-        return False
-    print("✅ 飞书推送成功", file=sys.stderr)
-    return True
+    all_ok = True
+    for idx, url in enumerate(urls, 1):
+        ok, result = _post_json(url, {"msg_type": "text", "content": {"text": text}})
+        if not ok:
+            print(f"❌ 飞书群{idx} 推送失败: {result}", file=sys.stderr)
+            all_ok = False
+            continue
+        code = result.get("code", result.get("StatusCode", -1))
+        if code not in (0, None) and str(code) != "0":
+            print(f"❌ 飞书群{idx} 返回错误: {result}", file=sys.stderr)
+            all_ok = False
+            continue
+        print(f"✅ 飞书群{idx} 推送成功", file=sys.stderr)
+    return all_ok
 
 
 def push_wecom(webhook, text, dry_run=False):
