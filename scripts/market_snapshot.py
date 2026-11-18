@@ -24,6 +24,7 @@ import os
 import re
 import ssl
 import sys
+import time
 import unicodedata
 import urllib.request
 from datetime import datetime
@@ -194,6 +195,58 @@ def fetch_news(per_cat=2, max_total=8, max_len=40):
 
 
 DAILY_BRIEF_API = "https://60s.viki.moe/v2/60s"
+
+
+LUNAR_API = "https://60s.viki.moe/v2/lunar?date={date}"
+
+CN_WEEK = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+
+LUNAR_CACHE_FILE = os.path.join(BASE_DIR, "data", "lunar-cache.json")
+
+
+def _lunar_cache_load():
+    try:
+        with open(LUNAR_CACHE_FILE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _lunar_cache_save(cache):
+    try:
+        os.makedirs(os.path.dirname(LUNAR_CACHE_FILE), exist_ok=True)
+        with open(LUNAR_CACHE_FILE, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh, ensure_ascii=False, indent=1)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def fetch_lunar_day(dt, attempts=3):
+    """查真实农历。重试 + 当日缓存兜底。都失败返回 None，绝不猜。"""
+    key = f"{dt:%Y-%m-%d}"
+
+    for _ in range(attempts):
+        try:
+            d = _http_json(LUNAR_API.format(date=key), {"User-Agent": "Mozilla/5.0"}, timeout=8)
+            lu = (d.get("data") or {}).get("lunar") or {}
+            year, month, day = lu.get("year"), lu.get("month"), lu.get("day")
+            if month and day:
+                val = f"{year or ''}年{month}月{day}".lstrip("年")
+                cache = _lunar_cache_load()
+                cache[key] = val
+                _lunar_cache_save(cache)
+                return val
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.4)
+
+    # 接口全挂时，用当天已缓存的值（同一天算出来的农历不会变）
+    cached = _lunar_cache_load().get(key)
+    if cached:
+        print(f"⚠️ 农历接口失败，使用当日缓存: {cached}", file=sys.stderr)
+        return cached
+    return None
 
 
 def fetch_daily_brief():
@@ -636,8 +689,9 @@ def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
     metals, domestic, cross = data["metals"], data["domestic"], data["cross"]
 
     # 标题必须含"金银"：飞书机器人安全设置里以它为关键词，缺了会被拒收（code 19024）
-    # 早报先取每日简讯（含农历），日期头放在最上方
+    # 早报先取每日简讯；注意简报源的 date/lunar 字段不可靠，日期头一律用本地日期 + 独立农历查询
     brief = fetch_daily_brief() if (extra and mode == "am") else None
+    brief_stale = bool(brief and brief.get("date") and brief["date"] != f"{now:%Y-%m-%d}")
 
     lines = [f"📊 金银 · {now:%m-%d} {title}"]
     if warning:
@@ -676,7 +730,11 @@ def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
     # ---- 每日简讯（早报）/ 财经要闻（晚报）----
     if brief:
         lines.append("")
-        lines.append(f"📰 每日简讯（{len(brief['news'])} 条）")
+        if brief_stale:
+            lines.append(
+                f"📰 每日简讯（{len(brief['news'])} 条 · 来源日期 {brief['date']}，今日尚未更新）")
+        else:
+            lines.append(f"📰 每日简讯（{len(brief['news'])} 条）")
         for idx, item in enumerate(brief["news"], 1):
             lines.append(f"{idx}. {item}")
 
@@ -705,10 +763,11 @@ def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
             for w, pos, cn in ws:
                 lines.append(f"{pad(w, 20)}{pad(pos, 10)}{cn}")
 
-    if brief:
-        head = f"📅 {brief['date']} {brief['week']}"
-        if brief.get("lunar"):
-            head += f" 农历{str(brief['lunar']).split('年')[-1]}"
+    if extra and mode == "am":
+        head = f"📅 {now:%Y年%m月%d日} {CN_WEEK[now.weekday()]}"
+        lunar = fetch_lunar_day(now)
+        if lunar:
+            head += f" 农历{lunar.split('年')[-1]}"
         lines.insert(0, head)
         lines.insert(1, "")
 
