@@ -679,9 +679,6 @@ def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
         lines.append(f"📰 每日简讯（{len(brief['news'])} 条）")
         for idx, item in enumerate(brief["news"], 1):
             lines.append(f"{idx}. {item}")
-        if brief.get("tip"):
-            lines.append("")
-            lines.append(f"【微语】{brief['tip']}")
 
     if extra and mode == "pm":
         news, new_keys = fetch_news()
