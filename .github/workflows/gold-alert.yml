@@ -38,6 +38,18 @@ jobs:
           TZ: Asia/Shanghai
         run: python scripts/market_snapshot.py --mode pm --alert-only --push --no-save
 
+      - name: 保存预警状态（已报档位，防止重复推送）
+        run: |
+          git config user.name "market-bot"
+          git config user.email "market-bot@users.noreply.github.com"
+          git add data/ 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "状态无变化"
+          else
+            git commit -m "chore: 更新金价预警档位记录"
+            git push
+          fi
+
       - name: 失败时输出诊断
         if: failure()
         run: |
