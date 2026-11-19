@@ -477,16 +477,23 @@ def load_daily_words(now):
 
 
 # 金价分段预警（上海金 Au(T+D)，元/克）
-# 跌破哪一档就在进入更深一档时提醒一次，只报新低，避免反复打扰
-GOLD_ALERT_TIERS = [800.0, 750.0, 700.0]
+# 每跌 10 元一档，从 800 起往下排；只报新低，避免反复打扰
+GOLD_STEP = 10.0
+GOLD_ALERT_START = 800.0
+GOLD_ALERT_TIERS = [GOLD_ALERT_START - GOLD_STEP * i for i in range(11)]   # 800..700
 GOLD_ALERT_STATE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "data", "gold-alert-state.json")
 
-TIER_LABEL = {
-    1: "进入 700 多区间",
-    2: "跌破 750",
-    3: "跌破 700，到你的目标价",
-}
+def tier_label(tier):
+    """档位对应的人话描述。tier 1 = 开始跌破 800。"""
+    if not tier:
+        return ""
+    line = GOLD_ALERT_TIERS[tier - 1]
+    if line <= 700:
+        return f"跌破 {line:.0f} 元/克——你的目标区间"
+    if line >= 800:
+        return "进入 700 多区间"
+    return f"跌破 {line:.0f} 元/克"
 
 
 def price_to_tier(price):
@@ -902,7 +909,7 @@ def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
     if gold_price and gold_price > 0:
         tier = price_to_tier(gold_price)
         if tier > 0:
-            lines.insert(0, f"🚨 上海金 {fmt_price(gold_price)} · {TIER_LABEL[tier]}")
+            lines.insert(0, f"🚨 上海金 {fmt_price(gold_price)} · {tier_label(tier)}")
         if tier < len(GOLD_ALERT_TIERS):
             nxt = GOLD_ALERT_TIERS[tier]
             gap = (gold_price - nxt) / gold_price * 100
@@ -1162,7 +1169,7 @@ def main():
             print("未创新低，本轮不推送", file=sys.stderr)
             return 0
 
-        print(f"🚨 进入新档位 {tier}（{TIER_LABEL[tier]}），触发推送", file=sys.stderr)
+        print(f"🚨 进入新档位 {tier}（{tier_label(tier)}），触发推送", file=sys.stderr)
 
         text = build_feishu_text(args.mode, data, now, quote_dt, warning, extra=False)
         if not push_all(text, dry_run=args.dry_run):
