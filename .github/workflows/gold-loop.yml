@@ -1,0 +1,76 @@
+name: 金价循环巡检
+
+# GitHub 的 cron 在高峰期会跳过任务（实测漏过 5 小时），
+# 所以这里不再依赖 cron 的准点性：每次启动后自己循环 5.5 小时，
+# 内部每 5 分钟查一次，覆盖整个时间窗。公开仓库 Actions 分钟数无限。
+
+on:
+  schedule:
+    # 北京时间 08:00 / 14:00 / 20:00 各启动一次，每次连续跑 5.5 小时
+    - cron: "0 0 * * *"    # 08:00 北京 → 覆盖到 13:30
+    - cron: "0 6 * * *"    # 14:00 北京 → 覆盖到 19:30
+    - cron: "0 12 * * *"   # 20:00 北京 → 覆盖到次日 01:30
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gold-loop
+  cancel-in-progress: false
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350      # 5h50m，留出安全余量
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: pip install --quiet certifi
+
+      - name: 配置 git
+        run: |
+          git config user.name "market-bot"
+          git config user.email "market-bot@users.noreply.github.com"
+
+      - name: 循环巡检（每 5 分钟一次，共 5.5 小时）
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          DEEPSEEK_KEY: ${{ secrets.DEEPSEEK_KEY }}
+          TZ: Asia/Shanghai
+        run: |
+          END=$(( $(date +%s) + 19800 ))   # 5.5 小时 = 19800 秒
+          ROUND=0
+          while [ "$(date +%s)" -lt "$END" ]; do
+            ROUND=$((ROUND+1))
+            echo "===== 第 ${ROUND} 轮  $(TZ=Asia/Shanghai date '+%m-%d %H:%M:%S') ====="
+
+            # 档位预警（跌破 800/790/.../700）
+            python scripts/market_snapshot.py --mode pm --alert-only --push --no-save || \
+              echo "预警检查异常，继续下一轮"
+
+            # 异动预警（单日大跌 / 短时急跌）
+            python scripts/market_snapshot.py --mode pm --surge-only --push --no-save || \
+              echo "异动检查异常，继续下一轮"
+
+            # 状态落盘：有变化就提交，保证下一轮读到最新档位
+            git add data/ 2>/dev/null || true
+            if ! git diff --cached --quiet; then
+              git commit -q -m "chore: 巡检状态 $(TZ=Asia/Shanghai date '+%m-%d %H:%M')" || true
+              git pull --rebase -q origin main 2>/dev/null || true
+              git push -q origin main 2>/dev/null || echo "状态推送失败（不影响本轮结果）"
+            fi
+
+            sleep 300
+          done
+          echo "循环结束，共执行 ${ROUND} 轮"
