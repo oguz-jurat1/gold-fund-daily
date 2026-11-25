@@ -481,6 +481,10 @@ def load_daily_words(now):
 GOLD_STEP = 10.0
 GOLD_ALERT_START = 800.0
 GOLD_ALERT_TIERS = [GOLD_ALERT_START - GOLD_STEP * i for i in range(11)]   # 800..700
+
+# 上涨档位：每突破 10 元整数关口报一次（760、770、780……）
+GOLD_UP_START = 760.0
+GOLD_UP_TIERS = [GOLD_UP_START + GOLD_STEP * i for i in range(20)]        # 760..950
 GOLD_ALERT_STATE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "data", "gold-alert-state.json")
 
@@ -503,6 +507,22 @@ def price_to_tier(price):
         if price <= threshold:
             tier += 1
     return tier
+
+
+def price_to_up_tier(price):
+    """已突破的上涨档位数。0=还没站上 760，1=站上760，2=站上770……"""
+    tier = 0
+    for threshold in GOLD_UP_TIERS:
+        if price >= threshold:
+            tier += 1
+    return tier
+
+
+def up_tier_label(tier):
+    if not tier:
+        return ""
+    line = GOLD_UP_TIERS[tier - 1]
+    return f"站上 {line:.0f} 元/克"
 
 
 def read_alert_state():
@@ -871,7 +891,7 @@ FEISHU_SHORT = {
 FEISHU_INDEX = ["沪深300", "中证500", "创业板指", "科创50"]
 
 
-def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
+def build_feishu_text(mode, data, now, quote_dt, warning, extra=True, show_tier=False):
     """飞书消息：极简版，一行一个标的，只报涨跌幅。"""
     title = "盘前" if mode == "am" else "收盘"
     metals, domestic, cross = data["metals"], data["domestic"], data["cross"]
@@ -908,7 +928,7 @@ def build_feishu_text(mode, data, now, quote_dt, warning, extra=True):
     gold_price = next((r[2] for r in metals if "Au(T+D)" in r[0]), None)
     if gold_price and gold_price > 0:
         tier = price_to_tier(gold_price)
-        if tier > 0:
+        if tier > 0 and show_tier:
             lines.insert(0, f"🚨 上海金 {fmt_price(gold_price)} · {tier_label(tier)}")
         if tier < len(GOLD_ALERT_TIERS):
             nxt = GOLD_ALERT_TIERS[tier]
@@ -1161,24 +1181,42 @@ def main():
             return 0
 
         tier = price_to_tier(gold_price)
+        up_tier = price_to_up_tier(gold_price)
         state = read_alert_state()
         prev_max = int(state.get("max_tier", 0))
+        prev_up = int(state.get("max_up_tier", 0))
 
-        print(f"金价 {gold_price:.2f} 元/克 → 当前档位 {tier}（历史最深 {prev_max}）", file=sys.stderr)
-        if tier <= prev_max:
-            print("未创新低，本轮不推送", file=sys.stderr)
+        print(f"金价 {gold_price:.2f} 元/克 → 下跌档位 {tier}（历史最深 {prev_max}）"
+              f"｜上涨档位 {up_tier}（历史最高 {prev_up}）", file=sys.stderr)
+
+        down_fired = tier > prev_max
+        up_fired = up_tier > prev_up
+
+        if not down_fired and not up_fired:
+            print("既未创新低也未创新高，本轮不推送", file=sys.stderr)
             return 0
 
-        print(f"🚨 进入新档位 {tier}（{tier_label(tier)}），触发推送", file=sys.stderr)
+        if down_fired:
+            print(f"🚨 跌破新档位 {tier}（{tier_label(tier)}），触发推送", file=sys.stderr)
+        if up_fired:
+            print(f"🚨 站上新档位 {up_tier}（{up_tier_label(up_tier)}），触发推送", file=sys.stderr)
 
-        text = build_feishu_text(args.mode, data, now, quote_dt, warning, extra=False)
+        text = build_feishu_text(args.mode, data, now, quote_dt, warning,
+                                 extra=False, show_tier=False)
+        if down_fired and not up_fired:
+            text = f"🚨 上海金 {gold_price:.2f} · {tier_label(tier)}\n" + text
+        if up_fired:
+            text = f"🚨 上海金 {gold_price:.2f} · {up_tier_label(up_tier)}\n" + text
         if not push_all(text, dry_run=args.dry_run):
             return 1
 
-        state["max_tier"] = tier
-        state.setdefault("history", []).append(
-            {"date": now.strftime("%Y-%m-%d %H:%M"), "price": gold_price, "tier": tier}
-        )
+        state["max_tier"] = max(tier, prev_max)
+        state["max_up_tier"] = max(up_tier, prev_up)
+        state.setdefault("history", []).append({
+            "date": now.strftime("%Y-%m-%d %H:%M"), "price": gold_price,
+            "tier": tier, "up_tier": up_tier,
+            "dir": "up" if up_fired and not down_fired else ("down" if down_fired else "both"),
+        })
         write_alert_state(state)
         print(f"状态已更新：max_tier={tier}", file=sys.stderr)
         return 0
