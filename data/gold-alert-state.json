@@ -17,7 +17,14 @@
       "tier": 4,
       "up_tier": 1,
       "dir": "up"
+    },
+    {
+      "date": "2026-11-27 15:04",
+      "price": 784.1,
+      "tier": 2,
+      "up_tier": 3,
+      "dir": "up"
     }
   ],
-  "max_up_tier": 1
+  "max_up_tier": 3
 }
